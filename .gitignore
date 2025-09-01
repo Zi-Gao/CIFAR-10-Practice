@@ -1,3 +1,4 @@
 .DS_Store
 cifar-10/data/
 __pycache__
+cifar-10/run

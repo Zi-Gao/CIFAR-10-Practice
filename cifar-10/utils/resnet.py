@@ -1,137 +1,161 @@
-# by gemini 2.5 pro
-
 import torch
 import torch.nn as nn
-from typing import Type, List, Optional
+from torch import Tensor
+from typing import Type, Any, Callable, Union, List, Optional
 
-# 1. 实现基础残差块 (BasicBlock)
+# --- 基础组件 (无需修改) ---
+
+def conv3x3(in_planes: int, out_planes: int, stride: int = 1, groups: int = 1, dilation: int = 1) -> nn.Conv2d:
+    return nn.Conv2d(
+        in_planes, out_planes, kernel_size=3, stride=stride,
+        padding=dilation, groups=groups, bias=False, dilation=dilation
+    )
+
+def conv1x1(in_planes: int, out_planes: int, stride: int = 1) -> nn.Conv2d:
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+
 class BasicBlock(nn.Module):
-    """
-    ResNet-18/34 使用的基础残差块。
-    包含两个 3x3 的卷积层。
-    """
-    expansion = 1  # 输出通道数相对于输入通道数的扩展倍数
-
-    def __init__(self, in_channels: int, out_channels: int, stride: int = 1):
-        super(BasicBlock, self).__init__()
-        
-        # 主路径
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
+    expansion: int = 1
+    def __init__(
+        self, inplanes: int, planes: int, stride: int = 1, downsample: Optional[nn.Module] = None,
+        groups: int = 1, base_width: int = 64, dilation: int = 1, norm_layer: Optional[Callable[..., nn.Module]] = None
+    ) -> None:
+        super().__init__()
+        if norm_layer is None: norm_layer = nn.BatchNorm2d
+        if groups != 1 or base_width != 64: raise ValueError("BasicBlock only supports groups=1 and base_width=64")
+        if dilation > 1: raise NotImplementedError("Dilation > 1 not supported in BasicBlock")
+        self.conv1 = conv3x3(inplanes, planes, stride)
+        self.bn1 = norm_layer(planes)
         self.relu = nn.ReLU(inplace=True)
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        
-        # 快捷连接（Shortcut/Residual Connection）
-        self.downsample = None
-        # 当输入输出维度不匹配时（通道数或尺寸），需要对输入 x 进行变换以匹配主路径输出的维度
-        if stride != 1 or in_channels != self.expansion * out_channels:
-            self.downsample = nn.Sequential(
-                nn.Conv2d(in_channels, self.expansion * out_channels, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(self.expansion * out_channels)
-            )
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = norm_layer(planes)
+        self.downsample = downsample
+        self.stride = stride
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: Tensor) -> Tensor:
         identity = x
-
-        # 主路径前向传播
-        out = self.conv1(x)
-        out = self.bn1(out)
-        out = self.relu(out)
-        
-        out = self.conv2(out)
-        out = self.bn2(out)
-
-        # 如果有下采样层，则对输入 x 进行变换
-        if self.downsample is not None:
-            identity = self.downsample(x)
-        
-        # 将主路径的输出与快捷连接的输出相加
-        out += identity
-        out = self.relu(out)
-        
+        out = self.conv1(x); out = self.bn1(out); out = self.relu(out)
+        out = self.conv2(out); out = self.bn2(out)
+        if self.downsample is not None: identity = self.downsample(x)
+        out += identity; out = self.relu(out)
         return out
 
-# 2. 实现完整的 ResNet 类
+class Bottleneck(nn.Module):
+    expansion: int = 4
+    def __init__(
+        self, inplanes: int, planes: int, stride: int = 1, downsample: Optional[nn.Module] = None,
+        groups: int = 1, base_width: int = 64, dilation: int = 1, norm_layer: Optional[Callable[..., nn.Module]] = None
+    ) -> None:
+        super().__init__()
+        if norm_layer is None: norm_layer = nn.BatchNorm2d
+        width = int(planes * (base_width / 64.0)) * groups
+        self.conv1 = conv1x1(inplanes, width)
+        self.bn1 = norm_layer(width)
+        self.conv2 = conv3x3(width, width, stride, groups, dilation)
+        self.bn2 = norm_layer(width)
+        self.conv3 = conv1x1(width, planes * self.expansion)
+        self.bn3 = norm_layer(planes * self.expansion)
+        self.relu = nn.ReLU(inplace=True)
+        self.downsample = downsample
+        self.stride = stride
+
+    def forward(self, x: Tensor) -> Tensor:
+        identity = x
+        out = self.conv1(x); out = self.bn1(out); out = self.relu(out)
+        out = self.conv2(out); out = self.bn2(out); out = self.relu(out)
+        out = self.conv3(out); out = self.bn3(out)
+        if self.downsample is not None: identity = self.downsample(x)
+        out += identity; out = self.relu(out)
+        return out
+
 class ResNet(nn.Module):
     def __init__(
-        self, 
-        block: Type[BasicBlock], 
-        layers: List[int], 
-        num_classes: int = 1000, 
-        zero_init_residual: bool = False
-    ):
-        super(ResNet, self).__init__()
-        
-        self.in_channels = 64 # 第一个残差块的输入通道数
-        
-        # 输入部分 (Stem)
-        self.conv1 = nn.Conv2d(3, self.in_channels, kernel_size=7, stride=2, padding=3, bias=False)
-        self.bn1 = nn.BatchNorm2d(self.in_channels)
+        self, block: Type[Union[BasicBlock, Bottleneck]], layers: List[int], num_classes: int = 1000,
+        zero_init_residual: bool = False, groups: int = 1, width_per_group: int = 64,
+        replace_stride_with_dilation: Optional[List[bool]] = None, norm_layer: Optional[Callable[..., nn.Module]] = None
+    ) -> None:
+        super().__init__()
+        if norm_layer is None: norm_layer = nn.BatchNorm2d
+        self._norm_layer = norm_layer
+        self.inplanes = 64
+        self.dilation = 1
+        if replace_stride_with_dilation is None: replace_stride_with_dilation = [False, False, False]
+        if len(replace_stride_with_dilation) != 3:
+            raise ValueError("replace_stride_with_dilation should be None or a 3-element tuple")
+        self.groups = groups
+        self.base_width = width_per_group
+        self.conv1 = nn.Conv2d(3, self.inplanes, kernel_size=7, stride=2, padding=3, bias=False)
+        self.bn1 = norm_layer(self.inplanes)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
-        
-        # 四个残差阶段 (Layers)
-        self.layer1 = self._make_layer(block, 64, layers[0], stride=1)
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2)
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=3)
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=4)
-        
-        # 输出部分 (Head)
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1)) # 输出尺寸为 (1, 1)
+        self.layer1 = self._make_layer(block, 64, layers[0])
+        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dilate=replace_stride_with_dilation[0])
+        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dilate=replace_stride_with_dilation[1])
+        self.layer4 = self._make_layer(block, 512, layers[3], stride=2, dilate=replace_stride_with_dilation[2])
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.fc = nn.Linear(512 * block.expansion, num_classes)
-        
-        # 初始化权重
+
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
             elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-                
-        # 将残差分支的最后一个 BN 层的 gamma 初始化为0，可以使得模型在初始阶段更容易训练
+                nn.init.constant_(m.weight, 1); nn.init.constant_(m.bias, 0)
         if zero_init_residual:
             for m in self.modules():
-                if isinstance(m, BasicBlock):
-                    nn.init.constant_(m.bn2.weight, 0)
+                if isinstance(m, Bottleneck) and m.bn3.weight is not None: nn.init.constant_(m.bn3.weight, 0)
+                elif isinstance(m, BasicBlock) and m.bn2.weight is not None: nn.init.constant_(m.bn2.weight, 0)
 
-    def _make_layer(self, block: Type[BasicBlock], out_channels: int, num_blocks: int, stride: int) -> nn.Sequential:
-        """
-        构建一个残差阶段（由多个残差块组成）。
-        """
+    def _make_layer(
+        self, block: Type[Union[BasicBlock, Bottleneck]], planes: int, blocks: int,
+        stride: int = 1, dilate: bool = False
+    ) -> nn.Sequential:
+        norm_layer = self._norm_layer; downsample = None; previous_dilation = self.dilation
+        if dilate: self.dilation *= stride; stride = 1
+        if stride != 1 or self.inplanes != planes * block.expansion:
+            downsample = nn.Sequential(
+                conv1x1(self.inplanes, planes * block.expansion, stride),
+                norm_layer(planes * block.expansion),
+            )
         layers = []
-        # 第一个残差块可能需要进行下采样
-        layers.append(block(self.in_channels, out_channels, stride))
-        
-        self.in_channels = out_channels * block.expansion
-        
-        # 后续的残差块不进行下采样
-        for _ in range(1, num_blocks):
-            layers.append(block(self.in_channels, out_channels, stride=1))
-            
+        layers.append(block(self.inplanes, planes, stride, downsample, self.groups, self.base_width, previous_dilation, norm_layer))
+        self.inplanes = planes * block.expansion
+        for _ in range(1, blocks):
+            layers.append(block(self.inplanes, planes, groups=self.groups, base_width=self.base_width, dilation=self.dilation, norm_layer=norm_layer))
         return nn.Sequential(*layers)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-
-        x = self.avgpool(x)
-        x = torch.flatten(x, 1) # 展平
-        x = self.fc(x)
-        
+    def _forward_impl(self, x: Tensor) -> Tensor:
+        x = self.conv1(x); x = self.bn1(x); x = self.relu(x); x = self.maxpool(x)
+        x = self.layer1(x); x = self.layer2(x); x = self.layer3(x); x = self.layer4(x)
+        x = self.avgpool(x); x = torch.flatten(x, 1); x = self.fc(x)
         return x
 
-# 3. 工厂函数，创建 ResNet-18 模型
-def resnet18(num_classes: int = 1000) -> ResNet:
-    """
-    返回一个 ResNet-18 模型实例。
-    ResNet-18 的结构是 [2, 2, 2, 2] 个 BasicBlock。
-    """
-    return ResNet(BasicBlock, [2, 2, 2, 2], num_classes=num_classes)
+    def forward(self, x: Tensor) -> Tensor:
+        return self._forward_impl(x)
+
+# --- 修正后的 CIFAR 版本 ResNet ---
+class ResNet_CIFAR(ResNet):
+    def __init__(
+        self,
+        block: Type[Union[BasicBlock, Bottleneck]],
+        layers: List[int],
+        num_classes: int = 10,
+        **kwargs: Any
+    ) -> None:
+        super().__init__(block, layers, num_classes=num_classes, **kwargs)
+
+        # --- 核心修改 ---
+        # 1. 修改第一个卷积层。使用固定的 64 作为输出通道数。
+        self.conv1 = nn.Conv2d(3, 64, kernel_size=3, stride=1, padding=1, bias=False)
+        
+        # 2. 用恒等映射替换最大池化层。
+        self.maxpool = nn.Identity()
+
+# --- 工厂函数 (无需修改) ---
+def resnet18(**kwargs: Any) -> ResNet_CIFAR:
+    return ResNet_CIFAR(BasicBlock, [2, 2, 2, 2], **kwargs)
+
+def resnet34(**kwargs: Any) -> ResNet_CIFAR:
+    return ResNet_CIFAR(BasicBlock, [3, 4, 6, 3], **kwargs)
+
+def resnet50(**kwargs: Any) -> ResNet_CIFAR:
+    return ResNet_CIFAR(Bottleneck, [3, 4, 6, 3], **kwargs)
