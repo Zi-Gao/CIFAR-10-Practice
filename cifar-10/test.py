@@ -46,7 +46,7 @@ label_name=['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'hor
 
 
 model = resnet18(num_classes=NUM_CLASS).to(device)
-checkpoint = torch.load('./run/resnet18/3/ckpt/best.pth.tar', map_location=device)
+checkpoint = torch.load('./run/resnet18/7/ckpt/best.pth.tar', map_location=device)
 model.load_state_dict(checkpoint['model_state_dict'])
 
 model.eval()
@@ -57,9 +57,7 @@ f=open("result.csv","w")
 f.write("id,label\n")
 
 for image, in tqdm(test_loader):
-    @torch.compile
     def run(image):
-
         image=normalize(image).to(device)
         output=model(image)
         _, predicted_indices = torch.max(output, 1) # 返回最大值和对应的索引
@@ -73,4 +71,4 @@ for image, in tqdm(test_loader):
         i += 1
 
 
-## kaggle competitions submit -c cifar-10 -f submission.csv -m "Message"
+## kaggle competitions submit -c cifar-10 -f result.csv -m "ResNet18+Muon+300epoch"
