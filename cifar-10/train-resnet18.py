@@ -19,7 +19,7 @@ from torch.utils.tensorboard import SummaryWriter
 import torchvision
 
 from utils import read_data
-from utils.resnet import resnet18
+from utils.resnet_pretrained import resnet18_with_resize
 # from torchvision.models.resnet import resnet18
 from utils.normalize import normalize
 
@@ -33,11 +33,11 @@ torch.autograd.set_detect_anomaly(False)
 
 def get_augment_transform(p):
     return transforms.Compose([
-        transforms.RandomErasing(p=1, scale=(0.25*p, 0.5*p), ratio=(0.3*p, 3.3*p), value=0),
+        # transforms.RandomErasing(p=1, scale=(0.25*p, 0.5*p), ratio=(0.3*p, 3.3*p), value=0),
         transforms.RandomCrop(32,padding=4),
-        # transforms.RandomVerticalFlip(),
+        transforms.RandomVerticalFlip(),
         transforms.RandomHorizontalFlip(),
-        # transforms.RandAugment(num_ops=2, magnitude=int(4*p)),
+        transforms.RandAugment(num_ops=2, magnitude=int(4*p)),
         v2.AugMix()
     ])
 
@@ -82,11 +82,11 @@ def main():
 
     # augment_transform=get_augment_transform(1)
 
-    batch_size=512
+    batch_size=128
     train_dataset=CIFAR10_dataset(train_images,train_labels,get_augment_transform(1))
     train_loader=DataLoader(train_dataset,batch_size=batch_size,shuffle=True,num_workers=2,persistent_workers=True)
 
-    vaild_batch_size=512
+    vaild_batch_size=128
     test_dataset=CIFAR10_dataset(test_images,test_labels)
     test_loader=DataLoader(test_dataset,batch_size=vaild_batch_size,shuffle=False,num_workers=2,persistent_workers=True)
 
@@ -94,7 +94,8 @@ def main():
     # 3. 模型、损失函数、优化器设置
     # ==============================================================================
     print("\n3. Setting up model and training components...")
-    model = resnet18(num_classes=NUM_CLASS)
+    # model = resnet18(num_classes=NUM_CLASS,pretrained=True)
+    model=resnet18_with_resize(num_classes=10,pretrained=True)
 
     model = model.to(device)
     # checkpoint = torch.load('./run/resnet18/5/ckpt/best.pth.tar', map_location=device)
@@ -121,17 +122,20 @@ def main():
 
     total_params = len(list(model.parameters()))
     assigned_params = len(muon_params) + len(other_params)
-    assert total_params == assigned_params, "Some parameters were not assigned to an optimizer!"
+    # assert total_params == assigned_params, "Some parameters were not assigned to an optimizer!"
 
     num_epochs=300
 
-    optimizer = Muon([
-        {'params': muon_params, "use_muon": True, 'lr': 0.02, 'weight_decay': 0.001}, # group 0
-        {'params': other_params, "use_muon": False, 'lr': 0.001, 'weight_decay': 0.001} # group 1
-    ])
+    optimizer=optim.SGD(model.parameters(),lr=0.1,momentum=0.2)
+    # optimizer = Muon([
+    #     {'params': muon_params, "use_muon": True, 'lr': 0.02, 'weight_decay': 0.001}, # group 0
+    #     {'params': other_params, "use_muon": False, 'lr': 0.001, 'weight_decay': 0.001} # group 1
+    # ])
 
-    lr_scheduler = OneCycleLR(optimizer,  total_steps=num_epochs,max_lr=[0.02,0.001])
-    # lr_scheduler=ReduceLROnPlateau(optimizer,mode='max',factor=0.5)
+    # lr_scheduler = OneCycleLR(optimizer,  total_steps=num_epochs,max_lr=[0.02,0.001])
+    # lr_scheduler = OneCycleLR(optimizer,  total_steps=num_epochs,max_lr=0.01)
+    
+    lr_scheduler=ReduceLROnPlateau(optimizer,mode='max')
 
     print(f"Muon Optimizer is handling {len(muon_params)} parameter tensors.")
     print(f"Adam Optimizer is handling {len(other_params)} parameter tensors.")
@@ -141,7 +145,7 @@ def main():
     # ==============================================================================
     # 4. 训练循环
     # ==============================================================================
-    run_path='run/resnet18/8'
+    run_path='run/resnet18/9'
     writer_path=f"{run_path}/tb"
     checkpoint_path=f"{run_path}/ckpt"
     if os.path.exists(run_path):
@@ -178,7 +182,8 @@ def main():
         train_evaler=Evaler('train')
         progress_bar = tqdm(train_loader, desc=f"Epoch(Train) {epoch+1}/{num_epochs}",leave=False)
 
-        for images,labels in progress_bar:
+        @torch.compile
+        def train(images,labels):
             images=images.to(device)
             labels=labels.to(device)
             images,labels=cutmix(images,labels)
@@ -193,6 +198,23 @@ def main():
             loss.backward()
             optimizer.step()
             train_evaler.upd(outputs,labels,loss)
+
+        for images,labels in progress_bar:
+#             images=images.to(device)
+#             labels=labels.to(device)
+#             images,labels=cutmix(images,labels)
+# 
+#             # print(labels.shape)
+# 
+#             optimizer.zero_grad()
+# 
+#             outputs=model(images)
+#             loss=criterion(outputs,labels)
+# 
+#             loss.backward()
+#             optimizer.step()
+#             train_evaler.upd(outputs,labels,loss)
+            train(images,labels)
 
 
         model.eval()
@@ -226,7 +248,7 @@ def main():
         }
         checkpoint_manager.save(state)
         
-        lr_scheduler.step()
+        # lr_scheduler.step()
 
         # if val_acc>acc_max:
         #     acc_max=val_acc
@@ -238,7 +260,7 @@ def main():
         #     cnt=0
         #     tqdm.write(f"Reduce augment p!! now:{current_p}")
 
-        # lr_scheduler.step(val_acc)
+        lr_scheduler.step(val_acc)
 
         tqdm.write("train:"+str(train_evaler.result()))
         tqdm.write("vaild:"+str(vaild_evaler.result()))
@@ -247,7 +269,7 @@ def main():
         vaild_evaler.upd_board(writer,epoch)
 
         writer.add_scalars('Learning rate',{"Muon":optimizer.param_groups[0]['lr']},epoch)
-        writer.add_scalars('Learning rate',{"Adam":optimizer.param_groups[1]['lr']},epoch)
+        # writer.add_scalars('Learning rate',{"Adam":optimizer.param_groups[1]['lr']},epoch)
         
 
         # writer.add_scalar('Vaild loss',val_loss,epoch)
@@ -255,6 +277,7 @@ def main():
         
         original_images = train_images[:8]
         augmented_images = torch.stack([get_augment_transform(current_p)(img) for img in original_images])
+        augmented_images,_=cutmix(augmented_images,torch.randint(0, 10, (8,), dtype=torch.long))
         
         comparison_batch = torch.cat([original_images, augmented_images]).float()
         grid = torchvision.utils.make_grid(comparison_batch, nrow=8, normalize=True)
