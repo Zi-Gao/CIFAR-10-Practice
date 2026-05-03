@@ -9,15 +9,18 @@ def predict(model, images, device):
     return outputs
 
 def predict_tta(model, images, device):
-    """Test-Time Augmentation: Original + Horizontal Flip."""
+    """Test-Time Augmentation: Original + Horizontal Flip.
+    Returns BOTH standard and TTA outputs to save compute in training loops.
+    """
     model.eval()
     with torch.no_grad():
+        images = images.to(device)
         # Original images
-        outputs = model(images.to(device))
-        # Horizontal flip: images shape (N, C, H, W), flip dimension 3
-        outputs_flipped = model(torch.flip(images, [3]).to(device))
+        outputs = model(images)
+        # Horizontal flip on GPU
+        outputs_flipped = model(torch.flip(images, [3]))
         avg_outputs = (outputs + outputs_flipped) / 2
-    return avg_outputs
+    return outputs, avg_outputs
 
 class EMA:
     def __init__(self, model, decay, ema_buffers=False):

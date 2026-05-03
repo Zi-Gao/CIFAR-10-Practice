@@ -4,5 +4,5 @@ cifar-10/data/
 cifar-10/run
 cifar-10/result.csv
 cifar-10-ng/data/
-cifar-10-ng/run
+cifar-10-ng/runs
 cifar-10-ng/result.csv

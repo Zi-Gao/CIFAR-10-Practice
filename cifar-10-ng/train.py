@@ -12,7 +12,7 @@ import glob
 
 from model import resnet18
 from utils.data_utils import CIFAR10NpyDataset, get_train_transform, get_val_transform
-from utils.inference import EMA, predict, predict_tta
+from utils.inference import EMA,  predict_tta
 
 # Training Hyperparameters
 BATCH_SIZE = 128
@@ -93,21 +93,24 @@ def main():
     print(f"Remark: {args.remark}")
     print(f"1D Optimizer: {args.opt1d}")
 
-    # Datasets & Dataloaders
+    # Datasets & Dataloaders - Reverting to CPU storage to support multi-threading
     data_dir = "cifar-10-ng/data"
     train_dataset = CIFAR10NpyDataset(
         os.path.join(data_dir, "train_images.npy"),
         os.path.join(data_dir, "train_labels.npy"),
-        transform=get_train_transform()
+        transform=get_train_transform(),
+        device='cpu'
     )
     val_dataset = CIFAR10NpyDataset(
         os.path.join(data_dir, "val_images.npy"),
         os.path.join(data_dir, "val_labels.npy"),
-        transform=get_val_transform()
+        transform=get_val_transform(),
+        device='cpu'
     )
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+    # Re-enable multi-threading and pin_memory
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=6, pin_memory=True, persistent_workers=True)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=6, pin_memory=True, persistent_workers=True)
 
     # Model & EMA
     model = resnet18(num_classes=10).to(device)
@@ -230,16 +233,16 @@ def main():
             for images, labels in pbar_val:
                 images, labels = images.to(device), labels.to(device)
                 
-                # Standard Inference
-                outputs = predict(model, images, device)
+                # Single call to get both standard and TTA outputs
+                outputs, outputs_tta = predict_tta(model, images, device)
+                
                 loss = criterion(outputs, labels)
                 val_loss += loss.item()
+                
                 _, predicted = outputs.max(1)
                 total += labels.size(0)
                 correct += predicted.eq(labels).sum().item()
                 
-                # TTA Inference
-                outputs_tta = predict_tta(model, images, device)
                 _, predicted_tta = outputs_tta.max(1)
                 correct_tta += predicted_tta.eq(labels).sum().item()
                 

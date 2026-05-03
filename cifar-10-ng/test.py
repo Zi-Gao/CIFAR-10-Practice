@@ -48,8 +48,8 @@ def main():
     print("Running inference on test set (with TTA)...")
     with torch.no_grad():
         for i, images in enumerate(tqdm(test_loader)):
-            outputs = predict_tta(model, images, device)
-            _, predicted = outputs.max(1)
+            _, outputs_tta = predict_tta(model, images, device)
+            _, predicted = outputs_tta.max(1)
             
             # Map IDs to labels
             for p in predicted:
