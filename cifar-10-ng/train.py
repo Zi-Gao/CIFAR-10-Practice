@@ -10,17 +10,19 @@ from datetime import datetime
 import re
 import glob
 
-from model import resnet18
+from model import resnet18, AirBench96, init_whitening_conv
 from utils.data_utils import CIFAR10NpyDataset, get_train_transform, get_val_transform
 from utils.inference import EMA,  predict_tta
+from utils.muon import Muon
 
 # Training Hyperparameters
 BATCH_SIZE = 128
-EPOCHS = 40
+EPOCHS = 45
 LR_MUON = 0.02
 MOMENTUM_MUON = 0.95
 LR_1D = 3e-4
 WD_1D = 0.01
+WHITEN_BIAS_EPOCHS = 5 # AirBench specific
 
 def find_latest_checkpoint(resume_path):
     if os.path.isfile(resume_path):
@@ -113,7 +115,18 @@ def main():
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=6, pin_memory=True, persistent_workers=True)
 
     # Model & EMA
-    model = resnet18(num_classes=10).to(device)
+    model = AirBench96(num_classes=10).to(device)
+    # model = resnet18(num_classes=10).to(device)
+    
+    # AirBench Initialization: Whitening the first layer
+    if isinstance(model, AirBench96):
+        print("Performing AirBench Whitening Initialization...")
+        # Use a small sample of training data for whitening
+        sample_loader = DataLoader(train_dataset, batch_size=5000, shuffle=True)
+        sample_images, _ = next(iter(sample_loader))
+        init_whitening_conv(model.whiten, sample_images.to(device))
+        print("Whitening Initialization Complete.")
+
     ema = EMA(model, decay=0.999, ema_buffers=args.ema_buffers)
 
     if args.resume and checkpoint_path:
@@ -127,26 +140,27 @@ def main():
     muon_params = []
     params_1d = []
     print("\n--- Optimizer Parameter Assignment ---")
-    print("Muon (2D weights):")
-    for name, param in model.named_parameters():
-        if not param.requires_grad:
-            continue
-        if param.ndim >= 2: # 2D weights (Conv, Linear)
-            muon_params.append(param)
-            print(f"  - {name:30} | Shape: {str(list(param.shape)):20}")
-        else: # 1D params (Bias, BN)
-            params_1d.append(param)
     
-    print(f"\n{args.opt1d.upper()} (1D params):")
     for name, param in model.named_parameters():
         if not param.requires_grad:
             continue
-        if param.ndim < 2:
-            print(f"  - {name:30} | Shape: {str(list(param.shape)):20}")
+        
+        # Following AirBench/Muon convention:
+        # Muon handles Conv weights (4D)
+        # 1D Optimizer handles everything else (Bias, BN, Linear)
+        if param.ndim == 4: 
+            muon_params.append(param)
+            # print(f"  [Muon] {name:30} | Shape: {str(list(param.shape)):20}")
+        else:
+            params_1d.append(param)
+            # print(f"  [1D]   {name:30} | Shape: {str(list(param.shape)):20}")
+    
+    print(f"Muon parameters: {len(muon_params)}")
+    print(f"1D parameters:   {len(params_1d)}")
     print("--------------------------------------\n")
     
-    # Using official torch.optim.Muon (requires 2D parameters)
-    optimizer_muon = optim.Muon(muon_params, lr=LR_MUON, momentum=MOMENTUM_MUON, nesterov=True, weight_decay=0)
+    # Using our custom Muon that handles nD parameters
+    optimizer_muon = Muon(muon_params, lr=LR_MUON, momentum=MOMENTUM_MUON, nesterov=True)
     
     if args.opt1d == "adamw":
         optimizer_1d = optim.AdamW(params_1d, lr=LR_1D, weight_decay=WD_1D)
@@ -194,7 +208,12 @@ def main():
             optimizer_muon.zero_grad()
             optimizer_1d.zero_grad()
             
-            outputs = model(images)
+            # For AirBench96, whiten bias gradient is detached after several epochs
+            if isinstance(model, AirBench96):
+                outputs = model(images, whiten_bias_grad=(epoch < WHITEN_BIAS_EPOCHS))
+            else:
+                outputs = model(images)
+                
             loss = criterion(outputs, labels)
             loss.backward()
             

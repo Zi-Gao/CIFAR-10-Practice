@@ -6,7 +6,7 @@ import pandas as pd
 from tqdm import tqdm
 import argparse
 
-from model import resnet18
+from model import resnet18,AirBench96
 from utils.data_utils import CIFAR10NpyDataset, get_val_transform
 from utils.inference import predict_tta,predict
 
@@ -20,7 +20,7 @@ def main():
     print(f"Using device: {device}")
 
     # Load Model
-    model = resnet18(num_classes=10).to(device)
+    model = AirBench96(num_classes=10).to(device)
     checkpoint = torch.load(args.ckpt, map_location=device)
     
     if 'model_state_dict' in checkpoint:

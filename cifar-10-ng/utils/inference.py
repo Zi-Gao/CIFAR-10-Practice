@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 def predict(model, images, device):
     """Standard inference."""
@@ -9,17 +10,36 @@ def predict(model, images, device):
     return outputs
 
 def predict_tta(model, images, device):
-    """Test-Time Augmentation: Original + Horizontal Flip.
+    """Test-Time Augmentation: Mirror + Translate (from airbench96).
     Returns BOTH standard and TTA outputs to save compute in training loops.
     """
     model.eval()
     with torch.no_grad():
         images = images.to(device)
-        # Original images
+        
+        # Basic mirror TTA
         outputs = model(images)
-        # Horizontal flip on GPU
-        outputs_flipped = model(torch.flip(images, [3]))
-        avg_outputs = (outputs + outputs_flipped) / 2
+        outputs_flipped = model(torch.flip(images, [-1]))
+        logits_mirror = 0.5 * (outputs + outputs_flipped)
+        
+        # Translation TTA (mirror + translate)
+        # Pad by 1 pixel with reflection
+        pad = 1
+        padded_images = F.pad(images, (pad,)*4, 'reflect')
+        
+        # Two translations: top-left and bottom-right
+        img_tl = padded_images[:, :, 0:32, 0:32]
+        img_br = padded_images[:, :, 2:34, 2:34]
+        
+        # Mirror TTA for each translation
+        logits_tl = 0.5 * (model(img_tl) + model(torch.flip(img_tl, [-1])))
+        logits_br = 0.5 * (model(img_br) + model(torch.flip(img_br, [-1])))
+        
+        logits_translate = 0.5 * (logits_tl + logits_br)
+        
+        # Final TTA is 50% mirror(original) + 50% mirror(translated)
+        avg_outputs = 0.5 * logits_mirror + 0.5 * logits_translate
+        
     return outputs, avg_outputs
 
 class EMA:
